@@ -1,0 +1,6 @@
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.33s
+     Running `target/debug/inference-api --model-dir script/../model/gemma-4-E2B-it`
+>> Loading weights from script/../model/gemma-4-E2B-it...
+>> Model loaded.
+>> API server listening on http://0.0.0.0:8080
+>> Encoding text: "<bos><|turn>system\nYou are a helpful assistant.<turn|>\n<|turn>user\nWhat is the capital of China? Answer in one word.<turn|>\n<|turn>model\n"

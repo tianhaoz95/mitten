@@ -1,0 +1,12 @@
+[package]
+name = "inference-model-gemma"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+burn = "0.16"
+safetensors = "0.4"
+half = "2"
+memmap2 = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

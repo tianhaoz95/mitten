@@ -1,0 +1,17 @@
+[package]
+name = "inference-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+inference-backend = { path = "../inference-backend" }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+parking_lot = "0.12"
+uuid = { version = "1", features = ["v4"] }
+slab = "0.4"
+rustc-hash = "2"
+thiserror = "2"
+crossbeam-queue = "0.3"
+
+[dev-dependencies]
+# No extra dev-dependencies needed for now

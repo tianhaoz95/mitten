@@ -67,7 +67,8 @@ pub fn start_tokenizer_service(tokenizer_path: &Path) -> Result<TokenizerHandle,
                         };
                         text.push_str(&format!("<|turn>{}\n{}<turn|>\n", role, msg.content));
                     }
-                    text.push_str("<|turn>model\n");
+                    // REMOVED trailing \n after model header
+                    text.push_str("<|turn>model");
                     eprintln!(">> Encoding text: {:?}", text);
                     let res = tokenizer.encode(text, false)
                         .map(|enc| enc.get_ids().to_vec())

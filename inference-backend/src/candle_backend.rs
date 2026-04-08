@@ -2,6 +2,7 @@
 /// Weight layout matches model/gemma-4-E2B-it/model.safetensors exactly.
 use std::path::Path;
 use std::sync::Mutex;
+use std::collections::HashMap;
 
 use candle_core::{DType, Device, Module, Result as CResult, Tensor, D};
 use candle_nn::{linear_no_bias as linear, Linear, VarBuilder};
@@ -10,6 +11,7 @@ use crate::backend::{BackendHandle, BoxFuture, KvPool, Logits};
 use crate::batch::Batch;
 use crate::config::ModelConfig;
 use crate::error::EngineError;
+use crate::request::{RequestState, RequestId};
 
 // ── RMSNorm ──────────────────────────────────────────────────────────────────
 
@@ -79,7 +81,7 @@ impl Attention {
         Ok((k, v))
     }
 
-    fn forward(&self, x: &Tensor, pos: &Tensor, cached_kv: Option<&(Tensor, Tensor)>) -> CResult<Tensor> {
+    fn forward(&self, x: &Tensor, pos: &Tensor, kv_cache: &mut Option<(Tensor, Tensor)>) -> CResult<Tensor> {
         let (b, seq, _) = x.dims3()?;
 
         let q = self.q_proj.forward(x)?
@@ -87,21 +89,33 @@ impl Attention {
         let q = self.q_norm.forward(&q)?;
         let q = apply_rope(&q, pos, self.head_dim, self.rotary_dim, self.rope_theta)?;
 
-        let (k, v) = if let Some(kv) = cached_kv {
-            (kv.0.clone(), kv.1.clone())
+        let (new_k, new_v) = self.compute_kv(x, pos)?;
+        
+        let (k, v) = if let Some((c_k, c_v)) = kv_cache {
+            let k = Tensor::cat(&[c_k.clone(), new_k], 2)?;
+            let v = Tensor::cat(&[c_v.clone(), new_v], 2)?;
+            *kv_cache = Some((k.clone(), v.clone()));
+            (k, v)
         } else {
-            self.compute_kv(x, pos)?
+            *kv_cache = Some((new_k.clone(), new_v.clone()));
+            (new_k, new_v)
         };
 
-        let k = repeat_kv(k, self.n_heads / self.n_kv_heads)?;
-        let v = repeat_kv(v, self.n_heads / self.n_kv_heads)?;
+        let k_ext = repeat_kv(k, self.n_heads / self.n_kv_heads)?;
+        let v_ext = repeat_kv(v, self.n_heads / self.n_kv_heads)?;
 
+        // HYBRID attention scaling
         let scaling = 1.0 / (self.head_dim as f64).sqrt();
-        let attn = (q.matmul(&k.transpose(D::Minus2, D::Minus1)?)? * scaling)?;
-        let attn = apply_causal_mask(attn, seq, if self.is_global { None } else { Some(self.sliding_window) })?;
+        let attn = (q.matmul(&k_ext.transpose(D::Minus2, D::Minus1)?)? * scaling)?;
+        
+        let attn_cap = 50.0f64;
+        let attn = ((attn / attn_cap)?.tanh()? * attn_cap)?;
+
+        let total_seq = k_ext.dim(2)?;
+        let attn = apply_causal_mask(attn, seq, total_seq, if self.is_global { None } else { Some(self.sliding_window) })?;
         let attn = candle_nn::ops::softmax_last_dim(&attn)?;
 
-        let out = attn.matmul(&v)?
+        let out = attn.matmul(&v_ext)?
             .transpose(1, 2)?.reshape((b, seq, self.n_heads * self.head_dim))?;
         self.o_proj.forward(&out)
     }
@@ -109,12 +123,12 @@ impl Attention {
 
 fn apply_rope(x: &Tensor, pos: &Tensor, head_dim: usize, rotary_dim: usize, rope_theta: f64) -> CResult<Tensor> {
     let half = rotary_dim / 2;
-    let (b, heads, seq, _) = x.dims4()?;
+    let (b, heads, seq, x_head_dim) = x.dims4()?;
     let dev = x.device();
     let dtype = x.dtype();
 
     let freqs: Vec<f32> = (0..half)
-        .map(|i| 1.0 / (rope_theta as f32).powf(2.0 * i as f32 / head_dim as f32))
+        .map(|i| 1.0 / (rope_theta as f32).powf(2.0 * i as f32 / rotary_dim as f32))
         .collect();
     let freqs = Tensor::from_vec(freqs, (1, 1, 1, half), dev)?.to_dtype(dtype)?;
     let pos_f = pos.to_dtype(dtype)?.reshape((1, 1, seq, 1))?;
@@ -130,8 +144,8 @@ fn apply_rope(x: &Tensor, pos: &Tensor, head_dim: usize, rotary_dim: usize, rope
         x2.broadcast_mul(&cos)?.add(&x1.broadcast_mul(&sin)?)?,
     ], D::Minus1)?;
 
-    if rotary_dim < head_dim {
-        let x_pass = x.narrow(D::Minus1, rotary_dim, head_dim - rotary_dim)?;
+    if rotary_dim < x_head_dim {
+        let x_pass = x.narrow(D::Minus1, rotary_dim, x_head_dim - rotary_dim)?;
         Tensor::cat(&[x_rotated, x_pass], D::Minus1)
     } else {
         Ok(x_rotated)
@@ -146,17 +160,19 @@ fn repeat_kv(x: Tensor, n_rep: usize) -> CResult<Tensor> {
         .reshape((b, heads * n_rep, seq, d))
 }
 
-fn apply_causal_mask(attn: Tensor, seq: usize, sliding_window: Option<usize>) -> CResult<Tensor> {
+fn apply_causal_mask(attn: Tensor, seq: usize, total_seq: usize, sliding_window: Option<usize>) -> CResult<Tensor> {
+    let device = attn.device();
     let mask = (0..seq).map(|i| {
-        (0..seq).map(|j| {
-            if j > i || (sliding_window.is_some() && i >= sliding_window.unwrap() && j < i - sliding_window.unwrap()) {
+        let cur_pos = total_seq - seq + i;
+        (0..total_seq).map(|j| {
+            if j > cur_pos || (sliding_window.is_some() && cur_pos >= sliding_window.unwrap() && j < cur_pos - sliding_window.unwrap()) {
                 f32::NEG_INFINITY
             } else {
                 0.0f32
             }
         }).collect::<Vec<_>>()
     }).flatten().collect::<Vec<_>>();
-    let mask = Tensor::from_vec(mask, (seq, seq), attn.device())?.to_dtype(attn.dtype())?;
+    let mask = Tensor::from_vec(mask, (seq, total_seq), device)?.to_dtype(attn.dtype())?;
     attn.broadcast_add(&mask)
 }
 
@@ -209,10 +225,10 @@ impl Layer {
     fn new(vb: VarBuilder, hidden: usize, intermediate: usize,
            n_heads: usize, n_kv_heads: usize, head_dim: usize,
            per_layer_dim: usize, is_global: bool, sliding_window: usize,
-           is_kv_shared: bool) -> CResult<Self> {
+           _is_kv_shared: bool) -> CResult<Self> {
         let rope_theta = if is_global { 1_000_000.0f64 } else { 10_000.0f64 };
         Ok(Self {
-            attn: Attention::new(vb.clone(), hidden, n_heads, n_kv_heads, head_dim, is_global, sliding_window, rope_theta, is_kv_shared)?,
+            attn: Attention::new(vb.clone(), hidden, n_heads, n_kv_heads, head_dim, is_global, sliding_window, rope_theta, false)?,
             mlp: Mlp::new(hidden, intermediate, vb.clone())?,
             input_norm: RmsNorm::new(hidden, 1e-6, vb.pp("input_layernorm"))?,
             post_attn_norm: RmsNorm::new(hidden, 1e-6, vb.pp("post_attention_layernorm"))?,
@@ -225,30 +241,30 @@ impl Layer {
         })
     }
 
-    fn forward_with_kv(&self, x: &Tensor, pos: &Tensor, per_layer_emb: &Tensor,
-               _cached_kv: Option<&(Tensor, Tensor)>) -> CResult<(Tensor, Option<(Tensor, Tensor)>)> {
-        let scalar = self.layer_scalar.to_dtype(x.dtype())?.exp()?;
+    fn forward(&self, x: &Tensor, pos: &Tensor, per_layer_emb: &Tensor,
+               kv_cache: &mut Option<(Tensor, Tensor)>) -> CResult<Tensor> {
+        let scalar = (self.layer_scalar.to_dtype(x.dtype())? + 1.0)?; 
 
         let normed = self.input_norm.forward(x)?;
-        let own_kv = self.attn.compute_kv(&normed, pos)?;
         let residual = x.clone();
-        let h = self.attn.forward(&normed, pos, Some(&own_kv))?;
+        let h = self.attn.forward(&normed, pos, kv_cache)?;
         let h = self.post_attn_norm.forward(&h)?;
         let x = (residual + h.broadcast_mul(&scalar)?)?;
 
         let residual = x.clone();
-        let h = self.mlp.forward(&self.pre_ffn_norm.forward(&x)?)?;
+        let normed = self.pre_ffn_norm.forward(&x)?;
+        let h = self.mlp.forward(&normed)?;
         let h = self.post_ffn_norm.forward(&h)?;
         let x = (residual + h.broadcast_mul(&scalar)?)?;
 
         let residual = x.clone();
-        let gate = gelu_pytorch_tanh(&self.per_layer_gate.forward(&x)?)?;
+        let gate = candle_nn::ops::sigmoid(&self.per_layer_gate.forward(&x)?)?;
         let gated = (gate * per_layer_emb)?;
         let proj = self.per_layer_proj.forward(&gated)?;
         let per_layer = self.per_layer_norm.forward(&proj)?;
         let x = (residual + per_layer.broadcast_mul(&scalar)?)?;
 
-        Ok((x, Some(own_kv)))
+        Ok(x)
     }
 }
 
@@ -286,13 +302,12 @@ impl Gemma4TextModel {
         let embed = candle_nn::embedding(vocab_size, hidden, lm_vb.pp("embed_tokens"))?;
         let embed_per_layer = candle_nn::embedding(vocab_size, n_layers * per_layer_dim, lm_vb.pp("embed_tokens_per_layer"))?;
         let per_layer_model_proj = linear(hidden, n_layers * per_layer_dim, lm_vb.pp("per_layer_model_projection"))?;
-        let num_kv_shared_layers = text["num_kv_shared_layers"].as_u64().unwrap_or(20) as usize;
-        let double_wide_start = n_layers - num_kv_shared_layers;
+        
         let mut layers = Vec::with_capacity(n_layers);
         for i in 0..n_layers {
             let is_global = layer_types.get(i).map_or(false, |t| t == "full_attention");
             let head_dim = if is_global { head_dim_global } else { head_dim_sliding };
-            let layer_intermediate = if i >= double_wide_start { intermediate * 2 } else { intermediate };
+            let layer_intermediate = if i >= 15 { intermediate * 2 } else { intermediate };
             layers.push(Layer::new(lm_vb.pp(format!("layers.{i}")), hidden, layer_intermediate, n_heads, n_kv_heads, head_dim, per_layer_dim, is_global, sliding_window, false)?);
         }
         let norm = RmsNorm::new(hidden, 1e-6, lm_vb.pp("norm"))?;
@@ -301,29 +316,44 @@ impl Gemma4TextModel {
         Ok(Self { embed, embed_per_layer, per_layer_model_proj, layers, norm, per_layer_proj_norm, lm_head_weight, n_layers, per_layer_dim, final_logit_softcap })
     }
 
-    fn forward(&self, input_ids: &Tensor, pos: &Tensor) -> CResult<Tensor> {
+    fn forward(&self, input_ids: &Tensor, pos: &Tensor, kv_cache: &mut [Option<(Tensor, Tensor)>]) -> CResult<Tensor> {
         let (b, seq) = input_ids.dims2()?;
         let mut x = self.embed.forward(input_ids)?;
-        // x = (x * (1536.0f64).sqrt())?; 
+        x = (x * (1536.0f64).sqrt())?;
+        
         let embed_part = (self.embed_per_layer.forward(input_ids)? * (self.per_layer_dim as f64).sqrt())?;
         let proj_part = (self.per_layer_model_proj.forward(&x)? * (1536.0f64).powf(-0.5))?;
         let proj_reshaped = proj_part.reshape((b, seq, self.n_layers, self.per_layer_dim))?;
         let proj_normed = self.per_layer_proj_norm.forward(&proj_reshaped)?;
         let proj_normed = proj_normed.reshape((b, seq, self.n_layers * self.per_layer_dim))?;
         let per_layer_all = ((proj_normed + embed_part)? * 2.0f64.powf(-0.5))?;
+
         for (i, layer) in self.layers.iter().enumerate() {
             let per_layer_emb = per_layer_all.narrow(D::Minus1, i * self.per_layer_dim, self.per_layer_dim)?;
-            let (new_x, _) = layer.forward_with_kv(&x, pos, &per_layer_emb, None)?;
-            x = new_x;
+            x = layer.forward(&x, pos, &per_layer_emb, &mut kv_cache[i])?;
         }
+
         let x = self.norm.forward(&x)?;
         let (b, seq, h) = x.dims3()?;
         let x_2d = x.reshape((b * seq, h))?;
         let logits_2d = x_2d.matmul(&self.lm_head_weight.t()?)?;
-        let logits_2d = (logits_2d * (1.0 / (1536.0f64).sqrt()))?;
+        
+        // Correct Softcapping
+        let logits_2d = (logits_2d * (1.0 / (h as f64).sqrt()))?;
+        let cap = self.final_logit_softcap as f64;
+        let logits_2d = (logits_2d / cap)?.tanh()?;
+        let logits_2d = (logits_2d * cap)?;
+        
+        // Debug: print top-5 tokens for the last position
+        if seq > 0 {
+            let last_logits = logits_2d.narrow(0, b * seq - 1, 1)?.flatten_all()?.to_vec1::<f32>()?;
+            let mut indexed: Vec<(usize, f32)> = last_logits.into_iter().enumerate().collect();
+            let beijing_logit = indexed[146332].1;
+            indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            eprintln!(">> Top-5 logits: {:?}, Beijing logit: {}", &indexed[..5], beijing_logit);
+        }
+
         let logits = logits_2d.reshape((b, seq, self.lm_head_weight.dim(0)?))?;
-        let cap = self.final_logit_softcap as f32;
-        let logits = ((logits / cap as f64)?.tanh()? * cap as f64)?;
         Ok(logits)
     }
 }
@@ -331,7 +361,7 @@ impl Gemma4TextModel {
 pub struct CandleBackend {
     model: Mutex<Gemma4TextModel>,
     config: ModelConfig,
-    pool: CandleKvPool,
+    kv_cache: Mutex<HashMap<RequestId, Vec<Option<(Tensor, Tensor)>>>>,
 }
 
 impl CandleBackend {
@@ -351,7 +381,7 @@ impl CandleBackend {
         let weights = model_dir.join("model.safetensors");
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[&weights], DType::F32, &device).map_err(|e| EngineError::Backend(format!("load weights: {e}")))? };
         let model = Gemma4TextModel::load(vb, &cfg).map_err(|e| EngineError::Backend(format!("build model: {e}")))?;
-        Ok(Self { model: Mutex::new(model), config: model_config, pool: CandleKvPool { total: 512, free: 512 } })
+        Ok(Self { model: Mutex::new(model), config: model_config, kv_cache: Mutex::new(HashMap::new()) })
     }
 }
 
@@ -359,31 +389,38 @@ impl BackendHandle for CandleBackend {
     fn forward(&self, batch: &Batch) -> BoxFuture<'_, Result<Logits, EngineError>> {
         let num_requests = batch.requests.len();
         let vocab_size = self.config.vocab_size;
+        let num_layers = self.config.num_layers;
 
         let result = (|| -> Result<Logits, EngineError> {
             let device = Device::Cpu;
             let mut all_data = Vec::with_capacity(num_requests * vocab_size);
+            let model = self.model.lock().unwrap();
+            let mut kv_caches = self.kv_cache.lock().unwrap();
+
+            let mut offset = 0;
             for req_arc in &batch.requests {
                 let req = req_arc.lock();
-                let mut full_seq = req.input_ids.clone();
-                full_seq.extend_from_slice(&req.output_ids);
-                let seq_len = full_seq.len();
+                let extend_len = if matches!(req.state, RequestState::Prefilling { .. }) { req.extend_len } else { 1 };
                 
-                let ids = Tensor::from_vec(full_seq, (1, seq_len), &device).map_err(|e| EngineError::Backend(e.to_string()))?;
-                let pos = Tensor::arange(0u32, seq_len as u32, &device).map_err(|e| EngineError::Backend(e.to_string()))?.reshape((1, seq_len)).map_err(|e| EngineError::Backend(e.to_string()))?;
-                
-                let logits_3d = self.model.lock().unwrap().forward(&ids, &pos).map_err(|e| EngineError::Backend(e.to_string()))?;
-                let last_logits = logits_3d.narrow(1, seq_len - 1, 1).map_err(|e| EngineError::Backend(e.to_string()))?
+                let ids_vec = batch.input_ids[offset..offset+extend_len].to_vec();
+                let pos_vec = batch.position_ids[offset..offset+extend_len].to_vec();
+                offset += extend_len;
+
+                let ids = Tensor::from_vec(ids_vec, (1, extend_len), &device).map_err(|e| EngineError::Backend(e.to_string()))?;
+                let pos = Tensor::from_vec(pos_vec, (1, extend_len), &device).map_err(|e| EngineError::Backend(e.to_string()))?;
+
+                let cache = kv_caches.entry(req.id).or_insert_with(|| vec![None; num_layers]);
+                let logits_3d = model.forward(&ids, &pos, cache).map_err(|e| EngineError::Backend(e.to_string()))?;
+                let last_logits = logits_3d.narrow(1, extend_len - 1, 1).map_err(|e| EngineError::Backend(e.to_string()))?
                     .flatten_all().map_err(|e| EngineError::Backend(e.to_string()))?
-                    .to_vec1::<f32>()
-                    .map_err(|e| EngineError::Backend(e.to_string()))?;
+                    .to_vec1::<f32>().map_err(|e| EngineError::Backend(e.to_string()))?;
                 all_data.extend_from_slice(&last_logits);
             }
             Ok(Logits { data: all_data, num_rows: num_requests, vocab_size })
         })();
         Box::pin(async move { result })
     }
-    fn kv_pool(&self) -> &dyn KvPool { &self.pool }
+    fn kv_pool(&self) -> &dyn KvPool { &CandleKvPool { total: 512, free: 512 } }
     fn model_config(&self) -> &ModelConfig { &self.config }
 }
 

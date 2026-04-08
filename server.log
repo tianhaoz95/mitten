@@ -1,6 +1,23 @@
-    Finished `dev` profile [optimized + debuginfo] target(s) in 0.33s
+   Compiling inference-backend v0.1.0 (/home/tianhaoz/github/mitten/inference-backend)
+warning: unused variable: `head_dim`
+   --> inference-backend/src/candle_backend.rs:124:41
+    |
+124 | ...os: &Tensor, head_dim: usize, rotary_dim:...
+    |                 ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_head_dim`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling inference-engine v0.1.0 (/home/tianhaoz/github/mitten/inference-engine)
+   Compiling inference-api v0.1.0 (/home/tianhaoz/github/mitten/inference-api)
+warning: `inference-backend` (lib) generated 1 warning (run `cargo fix --lib -p inference-backend` to apply 1 suggestion)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 2.88s
      Running `target/debug/inference-api --model-dir script/../model/gemma-4-E2B-it`
 >> Loading weights from script/../model/gemma-4-E2B-it...
 >> Model loaded.
 >> API server listening on http://0.0.0.0:8080
->> Encoding text: "<bos><|turn>system\nYou are a helpful assistant.<turn|>\n<|turn>user\nWhat is the capital of China? Answer in one word.<turn|>\n<|turn>model\n"
+>> Encoding text: "<bos><|turn>system\nYou are a helpful assistant.<turn|>\n<|turn>user\nWhat is the capital of China? Answer in one word.<turn|>\n<|turn>model"
+>> Top-5 logits: [(68871, 1.8442671), (129892, 1.7859503), (139387, 1.7548044), (189647, 1.705268), (79160, 1.691725)], Beijing logit: 0.7127215
+>> Top-5 logits: [(49578, 1.7305573), (198580, 1.683787), (199909, 1.6608623), (68871, 1.6393849), (43105, 1.6180282)], Beijing logit: 0.4495627
+>> Top-5 logits: [(10653, 2.0956178), (238886, 2.0845404), (26299, 1.9311808), (239460, 1.9229438), (181855, 1.908602)], Beijing logit: 1.282353
+>> Top-5 logits: [(110288, 1.8503486), (232325, 1.840002), (10653, 1.8331159), (239460, 1.8077722), (192166, 1.8033501)], Beijing logit: 1.1912324
+>> Top-5 logits: [(110288, 1.9733844), (68125, 1.865107), (194983, 1.8632067), (180170, 1.8601841), (89850, 1.7801857)], Beijing logit: 1.1252599

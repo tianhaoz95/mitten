@@ -50,6 +50,9 @@ pub fn start_tokenizer_service(tokenizer_path: &Path) -> Result<TokenizerHandle,
     let tokenizer = Tokenizer::from_file(tokenizer_path)
         .map_err(|e| TokenizerError::Internal(e.to_string()))?;
     
+    // Check if it's Qwen or Gemma based on vocab size or special tokens
+    let is_qwen = tokenizer.get_vocab_size(true) > 150000;
+
     let (encode_tx, mut encode_rx) = mpsc::channel::<EncodeRequest>(32);
     let (decode_tx, mut decode_rx) = mpsc::channel::<DecodeRequest>(32);
 
@@ -57,18 +60,34 @@ pub fn start_tokenizer_service(tokenizer_path: &Path) -> Result<TokenizerHandle,
         loop {
             tokio::select! {
                 Some(req) = encode_rx.recv() => {
-                    // Gemma 4 chat template: <bos><|turn>role\ncontent<turn|>\n...<|turn>model\n
-                    let mut text = String::from("<bos>");
-                    for msg in &req.messages {
-                        let role = match msg.role {
-                            crate::types::Role::System => "system",
-                            crate::types::Role::User => "user",
-                            crate::types::Role::Assistant => "model",
-                        };
-                        text.push_str(&format!("<|turn>{}\n{}<turn|>\n", role, msg.content));
-                    }
-                    // REMOVED trailing \n after model header
-                    text.push_str("<|turn>model");
+                    let text = if is_qwen {
+                        // Qwen Chat Template: <|im_start|>role\ncontent<|im_end|>\n
+                        let mut t = String::new();
+                        for msg in &req.messages {
+                            let role = match msg.role {
+                                crate::types::Role::System => "system",
+                                crate::types::Role::User => "user",
+                                crate::types::Role::Assistant => "assistant",
+                            };
+                            t.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", role, msg.content));
+                        }
+                        t.push_str("<|im_start|>assistant\n");
+                        t
+                    } else {
+                        // Gemma 4 chat template: <bos><|turn>role\ncontent<turn|>\n...<|turn>model
+                        let mut t = String::from("<bos>");
+                        for msg in &req.messages {
+                            let role = match msg.role {
+                                crate::types::Role::System => "system",
+                                crate::types::Role::User => "user",
+                                crate::types::Role::Assistant => "model",
+                            };
+                            t.push_str(&format!("<|turn>{}\n{}<turn|>\n", role, msg.content));
+                        }
+                        t.push_str("<|turn>model");
+                        t
+                    };
+                    
                     eprintln!(">> Encoding text: {:?}", text);
                     let res = tokenizer.encode(text, false)
                         .map(|enc| enc.get_ids().to_vec())

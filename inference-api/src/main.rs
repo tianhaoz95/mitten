@@ -61,20 +61,27 @@ async fn main() {
     tokio::spawn(run_overlapped_loop(ctx, sched_rx, gpu_tx));
 
     // Run inference on a dedicated thread (candle CPU ops are blocking)
+    let backend_thread = backend.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         while let Ok(work) = gpu_rx.recv() {
-            let res = rt.block_on(BackendHandle::forward(backend.as_ref(), &work.batch));
+            let res = rt.block_on(BackendHandle::forward(backend_thread.as_ref(), &work.batch));
             let _ = work.result_tx.send(res);
         }
     });
 
     let tokenizer = start_tokenizer_service(&tokenizer_path).expect("Failed to start tokenizer");
 
+    let model_name = if model_dir.to_string_lossy().contains("qwen") {
+        "qwen-3.5-0.8b"
+    } else {
+        "gemma-4-e2b-it"
+    }.to_string();
+
     let state = AppState {
         engine_tx: sched_tx,
         tokenizer,
-        model_name: "gemma-4-e2b-it".to_string(),
+        model_name,
     };
 
     let app = create_router(state);

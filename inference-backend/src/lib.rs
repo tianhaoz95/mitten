@@ -1,3 +1,4 @@
+pub mod models;
 pub mod backend;
 pub mod batch;
 pub mod config;

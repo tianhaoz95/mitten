@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 inference-engine = { path = "../inference-engine" }
-inference-backend = { path = "../inference-backend", features = ["candle"] }
+inference-backend = { path = "../inference-backend" }
 burn = { version = "0.16", features = ["ndarray"] }
 inference-model-common = { path = "../inference-model-common" }
 inference-model-gemma = { path = "../inference-model-gemma" }

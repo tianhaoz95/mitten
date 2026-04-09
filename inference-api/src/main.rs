@@ -4,10 +4,11 @@ use inference_engine::config::{EngineConfig, EngineStats};
 use inference_engine::kv_pool::KvCachePool;
 use inference_engine::radix_cache::RadixCache;
 use inference_backend::backend::BackendHandle;
-use inference_backend::{CandleBackend, burn_backend::BurnBackend};
+use inference_backend::burn_backend::BurnBackend;
 use inference_model_qwen::model::Qwen3_5Model;
+use inference_model_gemma::model::Gemma4Model;
 use inference_model_common::InferenceModel;
-use burn::backend::NdArray; // Default CPU backend for now
+use burn::backend::NdArray;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use std::path::PathBuf;
@@ -55,10 +56,30 @@ async fn main() {
             eos_token_id: q_cfg.text_config.eos_token_id,
         };
 
-        eprintln!(">> Using BurnBackend for Qwen (with loaded weights)");
         Arc::new(BurnBackend::new(model, model_config, device))
     } else {
-        Arc::new(CandleBackend::load(&model_dir).expect("Failed to load model"))
+        use inference_model_gemma::config::Gemma4Config;
+        use inference_backend::config::ModelConfig;
+        use burn::backend::ndarray::NdArrayDevice;
+
+        let config_str = std::fs::read_to_string(model_dir.join("config.json")).expect("No config.json");
+        let g_cfg: Gemma4Config = Gemma4Config::from_json(&config_str).expect("Failed to parse config");
+
+        let device = NdArrayDevice::default();
+        let model = Gemma4Model::<NdArray>::new(&g_cfg.text_config, &device);
+
+        let model_config = ModelConfig {
+            num_layers: g_cfg.text_config.num_hidden_layers,
+            num_kv_heads: g_cfg.text_config.num_key_value_heads,
+            head_dim: g_cfg.text_config.head_dim,
+            vocab_size: g_cfg.text_config.vocab_size,
+            is_moe: false,
+            num_experts: None,
+            top_k_experts: None,
+            eos_token_id: g_cfg.text_config.eos_token_id,
+        };
+
+        Arc::new(BurnBackend::new(model, model_config, device))
     };
     eprintln!(">> Model loaded.");
 
@@ -91,7 +112,6 @@ async fn main() {
 
     tokio::spawn(run_overlapped_loop(ctx, sched_rx, gpu_tx));
 
-    // Run inference on a dedicated thread (candle CPU ops are blocking)
     let backend_thread = backend.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();

@@ -17,10 +17,12 @@ ESCAPED_PROMPT=$(echo "$PROMPT" | sed 's/"/\\"/g')
 curl -s http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d "{
-    \"model\": \"qwen-3.5\",
+    \"model\": \"qwen-3.5-0.8b\",
     \"messages\": [
+      {\"role\": \"system\", \"content\": \"You are a helpful assistant.\"},
       {\"role\": \"user\", \"content\": \"$ESCAPED_PROMPT\"}
     ],
+    \"max_tokens\": 512,
     \"temperature\": 0.7,
     \"stream\": $STREAM
   }"

@@ -6,10 +6,40 @@ warning: unused import: `Result as CResult`
   |
   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
-warning: `inference-backend` (lib) generated 1 warning (run `cargo fix --lib -p inference-backend` to apply 1 suggestion)
-    Finished `dev` profile [optimized + debuginfo] target(s) in 0.48s
+warning: unused variable: `num_layers`
+  --> inference-backend/src/burn_backend.rs:34:13
+   |
+34 |         let num_layers = self.config.num_layers;
+   |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_layers`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `num_kv_heads`
+  --> inference-backend/src/burn_backend.rs:35:13
+   |
+35 |         let num_kv_heads = self.config.num_kv_heads;
+   |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_kv_heads`
+
+warning: unused variable: `head_dim`
+  --> inference-backend/src/burn_backend.rs:36:13
+   |
+36 |         let head_dim = self.config.head_dim;
+   |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_head_dim`
+
+warning: `inference-backend` (lib) generated 4 warnings (run `cargo fix --lib -p inference-backend` to apply 4 suggestions)
+warning: unused import: `inference_model_common::InferenceModel`
+ --> inference-api/src/main.rs:9:5
+  |
+9 | use inference_model_common::InferenceModel;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `inference-api` (bin "inference-api") generated 1 warning
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.35s
      Running `target/debug/inference-api --model-dir model/qwen-3.5-0.8b`
 >> Loading weights from model/qwen-3.5-0.8b...
+>> Using BurnBackend for Qwen (with loaded weights)
 >> Model loaded.
 >> API server listening on http://0.0.0.0:8080
 >> Encoding text: "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nWhat is the capital of China? Answer in one word.<|im_end|>\n<|im_start|>assistant\n"

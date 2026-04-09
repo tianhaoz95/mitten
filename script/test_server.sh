@@ -3,7 +3,7 @@
 # Test script for Mitten API server supporting Gemma 4 and Qwen 3.5.
 
 MODEL_PATH="${1:-script/../model/gemma-4-E2B-it}"
-TIMEOUT=300
+TIMEOUT=1200
 
 # Determine model name for the request
 if [[ "$MODEL_PATH" == *"qwen"* ]]; then

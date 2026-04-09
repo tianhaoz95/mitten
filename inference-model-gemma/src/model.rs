@@ -1,5 +1,6 @@
 use burn::prelude::*;
 use burn::nn::{Linear, LinearConfig, Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig};
+use inference_model_common::{InferenceModel, KVCacheState};
 use crate::config::Gemma4TextConfig;
 
 #[derive(Module, Debug)]
@@ -36,8 +37,10 @@ pub struct Gemma4Mlp<B: Backend> {
     pub down_proj: Linear<B>,
 }
 
-impl<B: Backend> Gemma4Model<B> {
-    pub fn new(config: &Gemma4TextConfig, device: &B::Device) -> Self {
+impl<B: Backend> InferenceModel<B> for Gemma4Model<B> {
+    type Config = Gemma4TextConfig;
+
+    fn new(config: &Self::Config, device: &B::Device) -> Self {
         let hidden = config.hidden_size;
         let vocab = config.vocab_size;
         let intermediate = config.intermediate_size;
@@ -76,12 +79,28 @@ impl<B: Backend> Gemma4Model<B> {
     }
 
     /// Forward pass skeleton — full paged attention implementation deferred to Phase 1.
-    pub fn forward(&self, input_ids: Tensor<B, 2, Int>) -> Tensor<B, 3> {
+    fn forward(
+        &self,
+        input_ids: Tensor<B, 2, Int>,
+        _position_ids: Tensor<B, 1, Int>,
+        _kv_cache: &mut [KVCacheState<B>],
+    ) -> Tensor<B, 3> {
         let [_batch, _seq] = input_ids.dims();
         let hidden = self.embedding.forward(input_ids);
         // Simplified: skip attention/MLP, just apply final norm + output projection
         let normed = self.norm.forward(hidden);
         let logits = self.output.forward(normed);
         logits
+    }
+
+    fn init_cache(&self, device: &B::Device) -> Vec<KVCacheState<B>> {
+        self.layers.iter().map(|layer| {
+            let n_kv_heads = layer.attention.n_kv_heads;
+            let head_dim = layer.attention.head_dim;
+            KVCacheState::Attention(
+                Tensor::zeros([1, n_kv_heads, 0, head_dim], device),
+                Tensor::zeros([1, n_kv_heads, 0, head_dim], device),
+            )
+        }).collect()
     }
 }

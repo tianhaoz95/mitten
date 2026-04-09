@@ -3073,9 +3073,13 @@ dependencies = [
  "async-stream",
  "axum",
  "axum-test",
+ "burn",
  "futures",
  "inference-backend",
  "inference-engine",
+ "inference-model-common",
+ "inference-model-gemma",
+ "inference-model-qwen",
  "parking_lot",
  "serde",
  "serde_json",
@@ -3096,6 +3100,9 @@ dependencies = [
  "candle-core 0.10.2",
  "candle-nn",
  "candle-transformers",
+ "inference-model-common",
+ "inference-model-gemma",
+ "inference-model-qwen",
  "parking_lot",
  "serde",
  "serde_json",
@@ -3119,11 +3126,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-model-common"
+version = "0.1.0"
+dependencies = [
+ "burn",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "inference-model-gemma"
 version = "0.1.0"
 dependencies = [
  "burn",
  "half",
+ "inference-model-common",
+ "memmap2",
+ "safetensors 0.4.5",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "inference-model-qwen"
+version = "0.1.0"
+dependencies = [
+ "burn",
+ "half",
+ "inference-model-common",
  "memmap2",
  "safetensors 0.4.5",
  "serde",

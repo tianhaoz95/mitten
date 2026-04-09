@@ -5,6 +5,7 @@ pub mod config;
 pub mod error;
 pub mod request;
 pub mod stub;
+pub mod burn_backend;
 #[cfg(feature = "wgpu")]
 pub mod wgpu;
 #[cfg(feature = "candle")]

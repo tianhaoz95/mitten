@@ -1,5 +1,5 @@
 [package]
-name = "inference-model-gemma"
+name = "inference-model-qwen"
 version = "0.1.0"
 edition = "2021"
 

@@ -4,7 +4,10 @@ use inference_engine::config::{EngineConfig, EngineStats};
 use inference_engine::kv_pool::KvCachePool;
 use inference_engine::radix_cache::RadixCache;
 use inference_backend::backend::BackendHandle;
-use inference_backend::CandleBackend;
+use inference_backend::{CandleBackend, burn_backend::BurnBackend};
+use inference_model_qwen::model::Qwen3_5Model;
+use inference_model_common::InferenceModel;
+use burn::backend::NdArray; // Default CPU backend for now
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use std::path::PathBuf;
@@ -26,9 +29,37 @@ async fn main() {
     let tokenizer_path = model_dir.join("tokenizer.json");
 
     eprintln!(">> Loading weights from {}...", model_dir.display());
-    let backend = Arc::new(
-        CandleBackend::load(&model_dir).expect("Failed to load model")
-    );
+    let backend: Arc<dyn BackendHandle> = if model_dir.to_string_lossy().contains("qwen") {
+        use inference_model_qwen::config::Qwen3_5Config;
+        use inference_model_qwen::loader;
+        use inference_backend::config::ModelConfig;
+        use burn::backend::ndarray::NdArrayDevice;
+
+        let config_str = std::fs::read_to_string(model_dir.join("config.json")).expect("No config.json");
+        let q_cfg: Qwen3_5Config = Qwen3_5Config::from_json(&config_str).expect("Failed to parse config");
+
+        let weights_path = model_dir.join("model.safetensors");
+        let weights_data = loader::load_safetensors_data(&weights_path).expect("Failed to load weights");
+
+        let device = NdArrayDevice::default();
+        let model = Qwen3_5Model::<NdArray>::new_with_weights(&q_cfg.text_config, &device, &weights_data);
+
+        let model_config = ModelConfig {
+            num_layers: q_cfg.text_config.num_hidden_layers,
+            num_kv_heads: q_cfg.text_config.num_key_value_heads,
+            head_dim: q_cfg.text_config.head_dim,
+            vocab_size: q_cfg.text_config.vocab_size,
+            is_moe: false,
+            num_experts: None,
+            top_k_experts: None,
+            eos_token_id: q_cfg.text_config.eos_token_id,
+        };
+
+        eprintln!(">> Using BurnBackend for Qwen (with loaded weights)");
+        Arc::new(BurnBackend::new(model, model_config, device))
+    } else {
+        Arc::new(CandleBackend::load(&model_dir).expect("Failed to load model"))
+    };
     eprintln!(">> Model loaded.");
 
     let model_config = backend.model_config().clone();

@@ -1,2 +1,5 @@
 /target
 /model
+*.log
+*.pid
+*.out

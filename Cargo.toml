@@ -4,7 +4,7 @@ members = [
     "inference-engine",
     "inference-api",
     "inference-backend",
-    "inference-model-gemma",
+    "inference-model-gemma", "inference-model-common", "inference-model-qwen",
 ]
 
 [profile.release]

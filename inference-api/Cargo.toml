@@ -6,6 +6,10 @@ edition = "2021"
 [dependencies]
 inference-engine = { path = "../inference-engine" }
 inference-backend = { path = "../inference-backend", features = ["candle"] }
+burn = { version = "0.16", features = ["ndarray"] }
+inference-model-common = { path = "../inference-model-common" }
+inference-model-gemma = { path = "../inference-model-gemma" }
+inference-model-qwen = { path = "../inference-model-qwen" }
 axum = { version = "0.8", features = ["macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "signal"] }
 serde = { version = "1", features = ["derive"] }

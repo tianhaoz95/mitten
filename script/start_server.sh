@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-MODEL_DIR="$(dirname "$0")/../model/gemma-4-E2B-it"
+MODEL_DIR="${1:-$(dirname "$0")/../model/gemma-4-E2B-it}"
 
 if [ ! -f "$MODEL_DIR/model.safetensors" ]; then
     echo "ERROR: model not found at $MODEL_DIR/model.safetensors"
@@ -10,7 +10,7 @@ fi
 
 echo ">> Starting Mitten API Server (model: $MODEL_DIR)..."
 cargo build -p inference-api
-./target/debug/inference-api &
+./target/debug/inference-api --model-dir "$MODEL_DIR" &
 SERVER_PID=$!
 
 cleanup() {

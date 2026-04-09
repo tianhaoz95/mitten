@@ -4,17 +4,18 @@ use candle_nn::{Linear, VarBuilder};
 pub struct RmsNorm {
     weight: Tensor,
     eps: f64,
+    use_qwen_scaling: bool,
 }
 
 impl RmsNorm {
     pub fn new(dim: usize, eps: f64, vb: VarBuilder) -> CResult<Self> {
         let weight = vb.get(dim, "weight")?;
-        Ok(Self { weight, eps })
+        Ok(Self { weight, eps, use_qwen_scaling: false })
     }
     
-    pub fn new_standard(dim: usize, eps: f64, vb: VarBuilder) -> CResult<Self> {
+    pub fn new_qwen(dim: usize, eps: f64, vb: VarBuilder) -> CResult<Self> {
         let weight = vb.get(dim, "weight")?;
-        Ok(Self { weight, eps })
+        Ok(Self { weight, eps, use_qwen_scaling: true })
     }
 }
 
@@ -25,9 +26,7 @@ impl Module for RmsNorm {
         let x_normed = x_f32.broadcast_div(&norm)?;
         
         let w_f32 = self.weight.to_dtype(DType::F32)?;
-        // Dynamic detection of Qwen-style centered-at-zero weights vs standard weights
-        let mean = w_f32.mean_all()?.to_vec0::<f32>()?;
-        let w = if mean < 0.5 {
+        let w = if self.use_qwen_scaling {
             (w_f32 + 1.0)?
         } else {
             w_f32

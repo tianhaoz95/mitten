@@ -84,7 +84,8 @@ async fn test_api_chat_completions() {
             "vocab": {
                 "hello": 0,
                 "world": 1,
-                " ": 2
+                " ": 2,
+                "[UNK]": 3
             },
             "unk_token": "[UNK]"
         }

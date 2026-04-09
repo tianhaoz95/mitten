@@ -1,16 +1,13 @@
-   Compiling inference-backend v0.1.0 (/home/tianhaoz/github/mitten/inference-backend)
 warning: unused import: `Result as CResult`
  --> inference-backend/src/candle_backend.rs:7:34
   |
-7 | ...ype, Device, Result as CResult, Tensor};
-  |                 ^^^^^^^^^^^^^^^^^
+7 | use candle_core::{DType, Device, Result as CResult, Tensor};
+  |                                  ^^^^^^^^^^^^^^^^^
   |
   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
-   Compiling inference-engine v0.1.0 (/home/tianhaoz/github/mitten/inference-engine)
-   Compiling inference-api v0.1.0 (/home/tianhaoz/github/mitten/inference-api)
 warning: `inference-backend` (lib) generated 1 warning (run `cargo fix --lib -p inference-backend` to apply 1 suggestion)
-    Finished `dev` profile [optimized + debuginfo] target(s) in 5.90s
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.48s
      Running `target/debug/inference-api --model-dir model/qwen-3.5-0.8b`
 >> Loading weights from model/qwen-3.5-0.8b...
 >> Model loaded.

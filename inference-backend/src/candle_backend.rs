@@ -39,12 +39,13 @@ impl CandleBackend {
         let model_type = cfg["model_type"].as_str().unwrap_or("gemma2");
         let (model, model_config) = if model_type == "qwen3_5" {
             let m = Qwen3_5Model::load(vb, &cfg).map_err(|e| EngineError::Backend(format!("build qwen: {e}")))?;
+            let text = &cfg["text_config"];
             let c = ModelConfig {
-                num_layers: cfg["num_hidden_layers"].as_u64().unwrap_or(24) as usize,
+                num_layers: text["num_hidden_layers"].as_u64().unwrap_or(24) as usize,
                 num_kv_heads: 2, head_dim: 256,
-                vocab_size: cfg["vocab_size"].as_u64().unwrap_or(248320) as usize,
+                vocab_size: text["vocab_size"].as_u64().unwrap_or(248320) as usize,
                 is_moe: false, num_experts: None, top_k_experts: None,
-                eos_token_id: cfg["eos_token_id"].as_u64().unwrap_or(151643) as u32,
+                eos_token_id: text["eos_token_id"].as_u64().unwrap_or(248044) as u32,
             };
             (Model::Qwen3_5(m), c)
         } else {

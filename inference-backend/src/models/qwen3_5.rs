@@ -55,11 +55,7 @@ impl GatedDeltaNet {
 
         let qkv_conv_in = mixed_qkv.transpose(1, 2)?;
         let qkv_conv_in = Tensor::cat(&[conv_cache.clone(), qkv_conv_in], 2)?;
-        let n_conv_cache = if seq >= 3 {
-             qkv_conv_in.narrow(2, qkv_conv_in.dim(2)? - 3, 3)?
-        } else {
-             qkv_conv_in.narrow(2, qkv_conv_in.dim(2)? - 3, 3)?
-        };
+        let n_conv_cache = qkv_conv_in.narrow(2, qkv_conv_in.dim(2)? - 3, 3)?;
 
         let qkv_conv = self.conv1d.forward(&qkv_conv_in)?;
         let qkv_conv = qkv_conv.transpose(1, 2)?.silu()?; 
@@ -94,10 +90,11 @@ impl GatedDeltaNet {
             let gt = g_exp.narrow(1, t, 1)?.squeeze(1)?; 
             let bt = beta.narrow(1, t, 1)?.squeeze(1)?; 
 
-            s = s.broadcast_mul(&gt.unsqueeze(D::Minus1)?.unsqueeze(D::Minus1)?)?;
             let pred_v = s.matmul(&kt.unsqueeze(D::Minus1)?)?.squeeze(D::Minus1)?; 
             let delta = (vt - pred_v)?;
             let update = delta.unsqueeze(D::Minus1)?.matmul(&kt.unsqueeze(D::Minus2)?)?; 
+            
+            s = s.broadcast_mul(&gt.unsqueeze(D::Minus1)?.unsqueeze(D::Minus1)?)?;
             s = (s + update.broadcast_mul(&bt.unsqueeze(D::Minus1)?.unsqueeze(D::Minus1)?)?)?;
 
             let yt = s.matmul(&qt.unsqueeze(D::Minus1)?)?.squeeze(D::Minus1)?; 
@@ -145,8 +142,8 @@ impl GatedAttention {
             k_proj: linear(hidden, n_kv_heads * head_dim, vb.pp("k_proj"))?,
             v_proj: linear(hidden, n_kv_heads * head_dim, vb.pp("v_proj"))?,
             o_proj: linear(n_heads * head_dim, hidden, vb.pp("o_proj"))?,
-            q_norm: RmsNorm::new(head_dim, 1e-6, vb.pp("q_norm"))?,
-            k_norm: RmsNorm::new(head_dim, 1e-6, vb.pp("k_norm"))?,
+            q_norm: RmsNorm::new_qwen(head_dim, 1e-6, vb.pp("q_norm"))?,
+            k_norm: RmsNorm::new_qwen(head_dim, 1e-6, vb.pp("k_norm"))?,
             n_heads,
             n_kv_heads,
             head_dim,
@@ -160,9 +157,9 @@ impl GatedAttention {
         let (b, seq, _) = x.dims3()?;
         
         let qz = self.q_proj.forward(x)?;
-        let q = qz.narrow(D::Minus1, 0, self.n_heads * self.head_dim)?
-            .reshape((b, seq, self.n_heads, self.head_dim))?;
-        let gate = qz.narrow(D::Minus1, self.n_heads * self.head_dim, self.n_heads * self.head_dim)?;
+        let qz = qz.reshape((b, seq, self.n_heads, 2, self.head_dim))?;
+        let q = qz.narrow(3, 0, 1)?.squeeze(3)?;
+        let gate = qz.narrow(3, 1, 1)?.squeeze(3)?.reshape((b, seq, self.n_heads * self.head_dim))?;
 
         let k = self.k_proj.forward(x)?.reshape((b, seq, self.n_kv_heads, self.head_dim))?; // [b, seq, kv_h, d]
         let v = self.v_proj.forward(x)?.reshape((b, seq, self.n_kv_heads, self.head_dim))?;
@@ -266,15 +263,15 @@ impl Qwen3_5Model {
                 QwenMixer::DeltaNet(GatedDeltaNet::new(l_vb.pp("linear_attn"), hidden, 16, 128, 128)?)
             };
             layers.push(Qwen3_5Layer {
-                norm: RmsNorm::new(hidden, 1e-6, l_vb.pp("input_layernorm"))?,
+                norm: RmsNorm::new_qwen(hidden, 1e-6, l_vb.pp("input_layernorm"))?,
                 mixer,
-                ffn_norm: RmsNorm::new(hidden, 1e-6, l_vb.pp("post_attention_layernorm"))?,
+                ffn_norm: RmsNorm::new_qwen(hidden, 1e-6, l_vb.pp("post_attention_layernorm"))?,
                 ffn_gate: linear(hidden, intermediate, l_vb.pp("mlp.gate_proj"))?,
                 ffn_up: linear(hidden, intermediate, l_vb.pp("mlp.up_proj"))?,
                 ffn_down: linear(intermediate, hidden, l_vb.pp("mlp.down_proj"))?,
             });
         }
-        let norm = RmsNorm::new(hidden, 1e-6, vb_lm.pp("norm"))?;
+        let norm = RmsNorm::new_qwen(hidden, 1e-6, vb_lm.pp("norm"))?;
         // tie_word_embeddings = true
         let lm_head = linear(hidden, vocab_size, vb_lm.pp("embed_tokens"))?;
         Ok(Self { embed, layers, norm, lm_head, vocab_size, hidden_size: hidden })

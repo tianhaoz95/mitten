@@ -36,7 +36,7 @@ warning: unused import: `inference_model_common::InferenceModel`
   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
 warning: `inference-api` (bin "inference-api") generated 1 warning
-    Finished `dev` profile [optimized + debuginfo] target(s) in 0.35s
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.32s
      Running `target/debug/inference-api --model-dir model/qwen-3.5-0.8b`
 >> Loading weights from model/qwen-3.5-0.8b...
 >> Using BurnBackend for Qwen (with loaded weights)

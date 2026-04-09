@@ -45,6 +45,7 @@ pub struct GatedAttention<B: Backend> {
     pub head_dim: usize,
     pub scaling: f64,
     pub rope_theta: f64,
+    pub rotary_dim: usize,
 }
 
 #[derive(Module, Debug)]
@@ -93,7 +94,7 @@ pub struct RmsNorm<B: Backend> {
 impl<B: Backend> RmsNorm<B> {
     pub fn new(dim: usize, eps: f64, device: &B::Device) -> Self {
         Self {
-            weight: Param::from_tensor(Tensor::ones([dim], device)),
+            weight: Param::from_tensor(Tensor::zeros([dim], device)),
             eps,
         }
     }
@@ -101,13 +102,13 @@ impl<B: Backend> RmsNorm<B> {
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
         let var = x.clone().powf_scalar(2.0).mean_dim(2);
         let x = x * (var + self.eps).sqrt().recip();
-        x * self.weight.val().reshape([1, 1, -1])
+        x * (self.weight.val().reshape([1, 1, -1]) + 1.0)
     }
     
     pub fn forward4(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
         let var = x.clone().powf_scalar(2.0).mean_dim(3);
         let x = x * (var + self.eps).sqrt().recip();
-        x * self.weight.val().reshape([1, 1, 1, -1])
+        x * (self.weight.val().reshape([1, 1, 1, -1]) + 1.0)
     }
 }
 
@@ -176,11 +177,7 @@ impl<B: Backend> InferenceModel<B> for Qwen3_5Model<B> {
 
         let normed = self.norm.forward(x);
         let logits = self.output.forward(normed);
-        
-        let h = self.hidden_size as f32;
-        let logits = logits * (1.0 / h.sqrt());
-        let cap = 50.0f32;
-        (logits / cap).tanh() * cap
+        logits
     }
 
     fn init_cache(&self, device: &B::Device) -> Vec<KVCacheState<B>> {
@@ -192,7 +189,7 @@ impl<B: Backend> InferenceModel<B> for Qwen3_5Model<B> {
                 ),
                 QwenMixer::DeltaNet(m) => KVCacheState::DeltaNet(
                     Tensor::zeros([1, m.n_heads, m.head_v_dim, m.head_k_dim], device),
-                    Tensor::zeros([1, 6144, 3], device),
+                    Tensor::zeros([1, m.in_proj_qkv.weight.val().dims()[0], 3], device),
                 ),
             }
         }).collect()
@@ -221,36 +218,45 @@ impl<B: Backend> Qwen3_5Model<B> {
 
         let layers = (0..config.num_hidden_layers).map(|i| {
             let prefix = format!("layers.{}", i);
-            let mixer = if (i + 1) % 4 == 0 {
+            let mixer = if config.layer_type(i) == "full_attention" {
                 let m_prefix = format!("{}.mixer", prefix);
+                let n_heads = config.num_attention_heads;
+                let n_kv_heads = config.num_key_value_heads;
+                let head_dim = config.head_dim;
                 QwenMixer::Attention(GatedAttention {
-                    q_proj: load_my_linear(device, weights, &format!("{}.q_proj", m_prefix), hidden, 2 * 8 * 256),
-                    k_proj: load_my_linear(device, weights, &format!("{}.k_proj", m_prefix), hidden, 2 * 256),
-                    v_proj: load_my_linear(device, weights, &format!("{}.v_proj", m_prefix), hidden, 2 * 256),
-                    o_proj: load_my_linear(device, weights, &format!("{}.o_proj", m_prefix), 8 * 256, hidden),
-                    q_norm: load_rms_norm(device, weights, &format!("{}.q_norm", m_prefix), 256, eps),
-                    k_norm: load_rms_norm(device, weights, &format!("{}.k_norm", m_prefix), 256, eps),
-                    n_heads: 8,
-                    n_kv_heads: 2,
-                    head_dim: 256,
-                    scaling: (256.0f64).powf(-0.5),
+                    q_proj: load_my_linear(device, weights, &format!("{}.q_proj", m_prefix), hidden, n_heads * head_dim * 2),
+                    k_proj: load_my_linear(device, weights, &format!("{}.k_proj", m_prefix), hidden, n_kv_heads * head_dim),
+                    v_proj: load_my_linear(device, weights, &format!("{}.v_proj", m_prefix), hidden, n_kv_heads * head_dim),
+                    o_proj: load_my_linear(device, weights, &format!("{}.o_proj", m_prefix), n_heads * head_dim, hidden),
+                    q_norm: load_rms_norm(device, weights, &format!("{}.q_norm", m_prefix), head_dim, eps),
+                    k_norm: load_rms_norm(device, weights, &format!("{}.k_norm", m_prefix), head_dim, eps),
+                    n_heads,
+                    n_kv_heads,
+                    head_dim,
+                    scaling: (head_dim as f64).powf(-0.5),
                     rope_theta,
+                    rotary_dim: config.rotary_dim(),
                 })
             } else {
                 let m_prefix = format!("{}.mixer", prefix);
+                let n_heads = config.linear_num_key_heads;
+                let head_k_dim = config.linear_key_head_dim;
+                let head_v_dim = config.linear_value_head_dim;
+                let qkv_dim = head_k_dim * n_heads * 2 + head_v_dim * n_heads;
+                let z_dim = head_v_dim * n_heads;
                 QwenMixer::DeltaNet(GatedDeltaNet {
-                    in_proj_qkv: load_my_linear(device, weights, &format!("{}.in_proj_qkv", m_prefix), hidden, 6144),
-                    in_proj_a: load_my_linear(device, weights, &format!("{}.in_proj_a", m_prefix), hidden, 16),
-                    in_proj_b: load_my_linear(device, weights, &format!("{}.in_proj_b", m_prefix), hidden, 16),
-                    in_proj_z: load_my_linear(device, weights, &format!("{}.in_proj_z", m_prefix), hidden, 2048),
-                    conv1d: load_conv1d(device, weights, &format!("{}.conv1d", m_prefix), 6144, 4),
-                    norm: load_rms_norm(device, weights, &format!("{}.norm", m_prefix), 128, eps),
-                    out_proj: load_my_linear(device, weights, &format!("{}.out_proj", m_prefix), 2048, hidden),
-                    dt_bias: load_param1(device, weights, &format!("{}.dt_bias", m_prefix), 16),
-                    a_log: load_param1(device, weights, &format!("{}.A_log", m_prefix), 16),
-                    n_heads: 16,
-                    head_k_dim: 128,
-                    head_v_dim: 128,
+                    in_proj_qkv: load_my_linear(device, weights, &format!("{}.in_proj_qkv", m_prefix), hidden, qkv_dim),
+                    in_proj_a: load_my_linear(device, weights, &format!("{}.in_proj_a", m_prefix), hidden, n_heads),
+                    in_proj_b: load_my_linear(device, weights, &format!("{}.in_proj_b", m_prefix), hidden, n_heads),
+                    in_proj_z: load_my_linear(device, weights, &format!("{}.in_proj_z", m_prefix), hidden, z_dim),
+                    conv1d: load_conv1d(device, weights, &format!("{}.conv1d", m_prefix), qkv_dim, 4),
+                    norm: load_rms_norm(device, weights, &format!("{}.norm", m_prefix), head_k_dim, eps),
+                    out_proj: load_my_linear(device, weights, &format!("{}.out_proj", m_prefix), z_dim, hidden),
+                    dt_bias: load_param1(device, weights, &format!("{}.dt_bias", m_prefix), n_heads),
+                    a_log: load_param1(device, weights, &format!("{}.A_log", m_prefix), n_heads),
+                    n_heads,
+                    head_k_dim,
+                    head_v_dim,
                 })
             };
 
@@ -292,12 +298,11 @@ impl<B: Backend> Qwen3_5Layer<B> {
 impl<B: Backend> GatedAttention<B> {
     pub fn forward(&self, x: Tensor<B, 3>, position_ids: Tensor<B, 1, Int>, cache: &mut KVCacheState<B>) -> Tensor<B, 3> {
         let [b, seq, _] = x.dims();
-        let qz = self.q_proj.forward(x.clone());
-        let qz = qz.reshape([b, seq, self.n_heads, 2, self.head_dim]);
-        
-        let q = qz.clone().slice([0..b, 0..seq, 0..self.n_heads, 0..1]).squeeze::<4>(3);
-        let gate: Tensor<B, 4> = qz.slice([0..b, 0..seq, 0..self.n_heads, 1..2]).squeeze::<4>(3);
-        let gate: Tensor<B, 3> = gate.reshape([b, seq, self.n_heads * self.head_dim]);
+        // q_proj output is [n_heads * head_dim * 2]: first half = q, second half = gate
+        let qg = self.q_proj.forward(x.clone()).reshape([b, seq, self.n_heads, 2, self.head_dim]);
+        let q = qg.clone().slice([0..b, 0..seq, 0..self.n_heads, 0..1, 0..self.head_dim]).squeeze::<4>(3);
+        let gate = qg.slice([0..b, 0..seq, 0..self.n_heads, 1..2, 0..self.head_dim]).squeeze::<4>(3)
+            .reshape([b, seq, self.n_heads * self.head_dim]);
 
         let k = self.k_proj.forward(x.clone()).reshape([b, seq, self.n_kv_heads, self.head_dim]);
         let v = self.v_proj.forward(x).reshape([b, seq, self.n_kv_heads, self.head_dim]);
@@ -305,48 +310,39 @@ impl<B: Backend> GatedAttention<B> {
         let q = self.q_norm.forward4(q);
         let k = self.k_norm.forward4(k);
 
-        let q = apply_rope(q, position_ids.clone(), self.head_dim, (self.head_dim as f32 * 0.25) as usize, self.rope_theta);
-        let k = apply_rope(k, position_ids, self.head_dim, (self.head_dim as f32 * 0.25) as usize, self.rope_theta);
+        let q = apply_rope(q, position_ids.clone(), self.head_dim, self.rotary_dim, self.rope_theta);
+        let k = apply_rope(k, position_ids, self.head_dim, self.rotary_dim, self.rope_theta);
 
-        let q = q.swap_dims(1, 2); // [b, heads, seq, d]
+        let q = q.swap_dims(1, 2);
         let k = k.swap_dims(1, 2);
         let v = v.swap_dims(1, 2);
 
         if let KVCacheState::Attention(ref mut k_cache, ref mut v_cache) = cache {
             *k_cache = Tensor::cat(vec![k_cache.clone(), k], 2);
             *v_cache = Tensor::cat(vec![v_cache.clone(), v], 2);
-            
+
             let [_, heads, seq_q, _] = q.dims();
             let [_, n_kv_heads, total_seq, head_dim] = k_cache.dims();
             let n_rep = heads / n_kv_heads;
-            
+
             let k_ext = if n_rep > 1 {
                 k_cache.clone().reshape([b, n_kv_heads, 1, total_seq, head_dim])
                     .repeat(&[1, 1, n_rep, 1, 1])
                     .reshape([b, heads, total_seq, head_dim])
-            } else {
-                k_cache.clone()
-            };
-            
+            } else { k_cache.clone() };
+
             let v_ext = if n_rep > 1 {
                 v_cache.clone().reshape([b, n_kv_heads, 1, total_seq, head_dim])
                     .repeat(&[1, 1, n_rep, 1, 1])
                     .reshape([b, heads, total_seq, head_dim])
-            } else {
-                v_cache.clone()
-            };
+            } else { v_cache.clone() };
 
             let mask = generate_causal_mask::<B>(seq_q, total_seq, &q.device());
             let mask = mask.repeat(&[b, heads, 1, 1]);
-            
+
             let attn = q.matmul(k_ext.transpose()) * self.scaling;
-            
-            let cap = 50.0f32;
-            let attn = (attn / cap).tanh() * cap;
-            
-            let attn = attn + mask;
-            let attn = burn::tensor::activation::softmax(attn, 3);
-            
+            let attn = burn::tensor::activation::softmax(attn + mask, 3);
+
             let out = attn.matmul(v_ext).swap_dims(1, 2).reshape([b, seq, self.n_heads * self.head_dim]);
             let out = burn::tensor::activation::sigmoid(gate) * out;
             self.o_proj.forward(out)

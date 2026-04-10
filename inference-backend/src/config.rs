@@ -7,5 +7,5 @@ pub struct ModelConfig {
     pub is_moe: bool,
     pub num_experts: Option<usize>,
     pub top_k_experts: Option<usize>,
-    pub eos_token_id: u32,
+    pub eos_token_ids: Vec<u32>,
 }

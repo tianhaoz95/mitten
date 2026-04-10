@@ -26,7 +26,7 @@ async fn test_api_chat_completions() {
         is_moe: false,
         num_experts: None,
         top_k_experts: None,
-        eos_token_id: 0,
+        eos_token_ids: vec![0],
     };
     let num_pages = 16;
     let page_size = 4;

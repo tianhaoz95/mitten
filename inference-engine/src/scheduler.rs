@@ -95,6 +95,8 @@ pub fn process_and_transition(ctx: &mut EngineContext, batch: &Batch, logits: Lo
         
         if is_prefill {
             req.device_len += req.extend_len;
+            let total = req.input_ids.len();
+            eprintln!(">> [prefill] {}/{} tokens", req.device_len, total);
             req.extend_len = 0;
             
             if req.device_len == req.input_ids.len() {
@@ -108,8 +110,8 @@ pub fn process_and_transition(ctx: &mut EngineContext, batch: &Batch, logits: Lo
                 // Move from prefilling to decoding list in ctx
                 if let Some(pos) = ctx.prefilling.iter().position(|r| Arc::ptr_eq(r, req_arc)) {
                     ctx.prefilling.remove(pos);
-                    ctx.decoding.push(req_arc.clone());
                 }
+                ctx.decoding.push(req_arc.clone());
                 
                 // Promote to radix cache
                 ctx.radix_cache.promote_request(&req);
@@ -121,19 +123,6 @@ pub fn process_and_transition(ctx: &mut EngineContext, batch: &Batch, logits: Lo
                 
                 row_offset += 1;
             } else {
-                // Still prefilling (chunked prefill), no logits produced yet for this request if it's not the last chunk?
-                // Actually, the backend might only produce logits for the last token of the chunk.
-                // But the engine only cares about the very last token of the whole prompt.
-                // Let's assume the backend only returns logits for the requests that finished their prefill in this batch.
-                // Wait, if it's chunked prefill, do we get logits for each chunk?
-                // Usually no, unless we need to sample.
-                // Let's re-read the spec for Logits.
-                // "For prefill batches: one row per request (last-position logits only)."
-                // This implies even for chunked prefill, it might produce logits.
-                // But we only sample when device_len == input_ids.len().
-                
-                // If it's not finished, we just increment row_offset if the backend produced a row for it.
-                // Let's assume the backend produces one row per prefill request in the batch.
                 row_offset += 1;
             }
         } else if matches!(req.state, RequestState::Decoding) {
@@ -143,11 +132,23 @@ pub fn process_and_transition(ctx: &mut EngineContext, batch: &Batch, logits: Lo
             req.output_ids.push(sampled_token);
             req.device_len += 1;
             
+            let detokenized = if let Some(dt) = &ctx.detokenizer {
+                dt(&req.output_ids)
+            } else {
+                format!("{:?}", req.output_ids)
+            };
+            eprintln!(">> [decode] {} tokens generated (EOS: {:?}): \"{}\"", 
+                req.output_ids.len(), 
+                ctx.config.model_config.eos_token_ids,
+                detokenized
+            );
+
             // Check for stop conditions
             let mut done = false;
             let mut finish_reason = FinishReason::EosToken; // Default
             
-            if sampled_token == ctx.config.model_config.eos_token_id {
+            if ctx.config.model_config.eos_token_ids.contains(&sampled_token) {
+                eprintln!(">> [stop] reached EOS token {}", sampled_token);
                 done = true;
                 finish_reason = FinishReason::EosToken;
             } else if req.output_ids.len() >= req.params.max_new_tokens {

@@ -17,6 +17,7 @@ pub struct EngineContext {
     pub decoding: Vec<Arc<Mutex<Request>>>,
     pub config: EngineConfig,
     pub stats: EngineStats,
+    pub detokenizer: Option<Arc<dyn Fn(&[u32]) -> String + Send + Sync>>,
 }
 
 pub struct GpuWork {

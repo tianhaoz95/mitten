@@ -5,15 +5,15 @@ use burn::module::Param;
 use inference_model_common::{InferenceModel, KVCacheState};
 use crate::config::Qwen3_5TextConfig;
 use std::collections::HashMap;
-
 #[derive(Module, Debug)]
 pub struct Qwen3_5Model<B: Backend> {
-    pub embedding: Embedding<B>,
+    pub embeddings: Vec<Embedding<B>>,
     pub layers: Vec<Qwen3_5Layer<B>>,
     pub norm: RmsNorm<B>,
-    pub output: MyLinear<B>,
+    pub output: Vec<MyLinear<B>>,
     pub vocab_size: usize,
     pub hidden_size: usize,
+    pub split_size: usize,
 }
 
 #[derive(Module, Debug)]
@@ -77,11 +77,7 @@ impl<B: Backend> MyLinear<B> {
     }
 
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
-        let [b, _seq, _] = x.dims();
-        let weight = self.weight.val().transpose();
-        let [d1, d2] = weight.dims();
-        let weight_3d = weight.reshape([1, d1, d2]).repeat(&[b, 1, 1]);
-        x.matmul(weight_3d)
+        x.matmul(self.weight.val().transpose().unsqueeze())
     }
 }
 
@@ -113,26 +109,23 @@ impl<B: Backend> RmsNorm<B> {
 }
 
 fn load_my_linear<B: Backend>(device: &B::Device, weights: &HashMap<String, Vec<f32>>, prefix: &str, in_dim: usize, out_dim: usize) -> MyLinear<B> {
-    let mut linear = MyLinear::new(in_dim, out_dim, device);
     if let Some(w) = weights.get(&format!("{}.weight", prefix)) {
-        linear.weight = Param::from_tensor(Tensor::<B, 2>::from_data(TensorData::new(w.clone(), [out_dim, in_dim]), device));
+        let expected = out_dim * in_dim;
+        let data = if w.len() > expected {
+            w[..expected].to_vec()
+        } else {
+            w.clone()
+        };
+        let tensor = Tensor::<B, 2>::from_data(TensorData::new(data, [out_dim, in_dim]).convert::<B::FloatElem>(), device);
+        return MyLinear { weight: Param::from_tensor(tensor) };
     }
-    linear
-}
-
-fn load_embedding<B: Backend>(device: &B::Device, weights: &HashMap<String, Vec<f32>>, prefix: &str, vocab: usize, hidden: usize) -> Embedding<B> {
-    let mut embedding = EmbeddingConfig::new(vocab, hidden).init(device);
-    if let Some(w) = weights.get(&format!("{}.weight", prefix)) {
-        let tensor = Tensor::<B, 2>::from_data(TensorData::new(w.clone(), [vocab, hidden]), device);
-        embedding.weight = Param::from_tensor(tensor);
-    }
-    embedding
+    MyLinear { weight: Param::from_tensor(Tensor::zeros([out_dim, in_dim], device)) }
 }
 
 fn load_rms_norm<B: Backend>(device: &B::Device, weights: &HashMap<String, Vec<f32>>, prefix: &str, dim: usize, eps: f64) -> RmsNorm<B> {
     let mut norm = RmsNorm::new(dim, eps, device);
     if let Some(w) = weights.get(&format!("{}.weight", prefix)) {
-        let tensor = Tensor::<B, 1>::from_data(TensorData::new(w.clone(), [dim]), device);
+        let tensor = Tensor::<B, 1>::from_data(TensorData::new(w.clone(), [dim]).convert::<B::FloatElem>(), device);
         norm.weight = Param::from_tensor(tensor);
     }
     norm
@@ -142,7 +135,7 @@ fn load_conv1d<B: Backend>(device: &B::Device, weights: &HashMap<String, Vec<f32
     let config = Conv1dConfig::new(channels, channels, kernel_size).with_bias(false).with_groups(channels);
     let mut conv = config.init(device);
     if let Some(w) = weights.get(&format!("{}.weight", prefix)) {
-        let tensor = Tensor::<B, 3>::from_data(TensorData::new(w.clone(), [channels, 1, kernel_size]), device);
+        let tensor = Tensor::<B, 3>::from_data(TensorData::new(w.clone(), [channels, 1, kernel_size]).convert::<B::FloatElem>(), device);
         conv.weight = Param::from_tensor(tensor);
     }
     conv
@@ -150,7 +143,7 @@ fn load_conv1d<B: Backend>(device: &B::Device, weights: &HashMap<String, Vec<f32
 
 fn load_param1<B: Backend>(device: &B::Device, weights: &HashMap<String, Vec<f32>>, name: &str, dim: usize) -> Param<Tensor<B, 1>> {
     if let Some(w) = weights.get(name) {
-        Param::from_tensor(Tensor::<B, 1>::from_data(TensorData::new(w.clone(), [dim]), device))
+        Param::from_tensor(Tensor::<B, 1>::from_data(TensorData::new(w.clone(), [dim]).convert::<B::FloatElem>(), device))
     } else {
         Param::from_tensor(Tensor::zeros([dim], device))
     }
@@ -169,23 +162,54 @@ impl<B: Backend> InferenceModel<B> for Qwen3_5Model<B> {
         position_ids: Tensor<B, 1, Int>,
         kv_cache: &mut [KVCacheState<B>],
     ) -> Tensor<B, 3> {
-        let mut x = self.embedding.forward(input_ids);
+        // Combined embedding from splits
+        let mut x: Option<Tensor<B, 3>> = None;
+        for i in 0..self.embeddings.len() {
+            let start = i * self.split_size;
+            let end = (start + self.split_size).min(self.vocab_size);
+            
+            // Mask for IDs in this split
+            let mask_low = input_ids.clone().greater_equal_elem(start as i32).float();
+            let mask_high = input_ids.clone().lower_elem(end as i32).float();
+            let mask = mask_low * mask_high;
+            
+            // Shift IDs to [local_start, local_end) and clamp to avoid out-of-bounds in other splits
+            let local_ids = (input_ids.clone() - start as i32).clamp(0, (end - start - 1) as i32);
+            let split_x = self.embeddings[i].forward(local_ids);
+            
+            // Apply mask
+            let masked_x = split_x * mask.unsqueeze_dim(2);
+            
+            if let Some(prev_x) = x {
+                x = Some(prev_x + masked_x);
+            } else {
+                x = Some(masked_x);
+            }
+        }
+        let mut x = x.unwrap();
 
         for (i, layer) in self.layers.iter().enumerate() {
             x = layer.forward(x, position_ids.clone(), &mut kv_cache[i]);
         }
 
         let normed = self.norm.forward(x);
-        let logits = self.output.forward(normed);
-        logits
+        
+        // Combined output logits
+        let mut logits_splits = Vec::new();
+        for out_layer in &self.output {
+            logits_splits.push(out_layer.forward(normed.clone()));
+        }
+        
+        // Concatenate along vocab dimension (dim 2)
+        Tensor::cat(logits_splits, 2)
     }
 
     fn init_cache(&self, device: &B::Device) -> Vec<KVCacheState<B>> {
         self.layers.iter().map(|layer| {
             match &layer.mixer {
                 QwenMixer::Attention(m) => KVCacheState::Attention(
-                    Tensor::zeros([1, m.n_kv_heads, 0, m.head_dim], device),
-                    Tensor::zeros([1, m.n_kv_heads, 0, m.head_dim], device),
+                    Tensor::zeros([1, m.n_kv_heads, 1, m.head_dim], device),
+                    Tensor::zeros([1, m.n_kv_heads, 1, m.head_dim], device),
                 ),
                 QwenMixer::DeltaNet(m) => KVCacheState::DeltaNet(
                     Tensor::zeros([1, m.n_heads, m.head_v_dim, m.head_k_dim], device),
@@ -204,17 +228,55 @@ impl<B: Backend> Qwen3_5Model<B> {
         let eps = config.rms_norm_eps;
         let rope_theta = config.rope_theta();
 
-        let embedding = load_embedding(device, weights, "embedding", vocab, hidden);
-        let norm = load_rms_norm(device, weights, "norm", hidden, eps);
-        let output = if weights.contains_key("output.weight") {
-            load_my_linear(device, weights, "output", hidden, vocab)
-        } else {
-            let mut output = MyLinear::new(hidden, vocab, device);
+        // Split vocab to avoid >2GB buffers in wgpu (Iris Xe limit)
+        // 64k * 1024 * 4 bytes = 256MB. Very safe.
+        let split_size = 64 * 1024;
+        let num_splits = (vocab + split_size - 1) / split_size;
+
+        let mut embeddings = Vec::new();
+        let mut outputs = Vec::new();
+
+        for i in 0..num_splits {
+            let start = i * split_size;
+            let end = (start + split_size).min(vocab);
+            let current_vocab = end - start;
+
+            // Load embedding split
             if let Some(w) = weights.get("embedding.weight") {
-                 output.weight = Param::from_tensor(Tensor::<B, 2>::from_data(TensorData::new(w.clone(), [vocab, hidden]), device));
+                let expected_full = vocab * hidden;
+                let split_data_len = current_vocab * hidden;
+                let mut split_data = vec![0.0f32; split_data_len];
+                let full_data = if w.len() > expected_full { &w[..expected_full] } else { w };
+                
+                // Copy slice
+                split_data.copy_from_slice(&full_data[start * hidden .. end * hidden]);
+                
+                let tensor = Tensor::<B, 2>::from_data(TensorData::new(split_data, [current_vocab, hidden]).convert::<B::FloatElem>(), device);
+                let mut emb = EmbeddingConfig::new(1, 1).init(device);
+                emb.weight = Param::from_tensor(tensor);
+                embeddings.push(emb);
+            } else {
+                embeddings.push(EmbeddingConfig::new(current_vocab, hidden).init(device));
             }
-            output
-        };
+
+            // Load output split (tied or explicit)
+            if weights.contains_key("output.weight") {
+                let w = weights.get("output.weight").unwrap();
+                let expected_full = vocab * hidden;
+                let split_data_len = current_vocab * hidden;
+                let mut split_data = vec![0.0f32; split_data_len];
+                let full_data = if w.len() > expected_full { &w[..expected_full] } else { w };
+                
+                split_data.copy_from_slice(&full_data[start * hidden .. end * hidden]);
+                let tensor = Tensor::<B, 2>::from_data(TensorData::new(split_data, [current_vocab, hidden]).convert::<B::FloatElem>(), device);
+                outputs.push(MyLinear { weight: Param::from_tensor(tensor) });
+            } else {
+                // Tied
+                outputs.push(MyLinear { weight: embeddings[i].weight.clone() });
+            }
+        }
+
+        let norm = load_rms_norm(device, weights, "norm", hidden, eps);
 
         let layers = (0..config.num_hidden_layers).map(|i| {
             let prefix = format!("layers.{}", i);
@@ -270,7 +332,15 @@ impl<B: Backend> Qwen3_5Model<B> {
             }
         }).collect();
 
-        Self { embedding, layers, norm, output, vocab_size: vocab, hidden_size: hidden }
+        Self {
+            embeddings,
+            layers,
+            norm,
+            output: outputs,
+            vocab_size: vocab,
+            hidden_size: hidden,
+            split_size,
+        }
     }
 }
 

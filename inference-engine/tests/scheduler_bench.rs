@@ -18,7 +18,7 @@ fn make_ctx(num_pages: usize, page_size: usize) -> EngineContext {
         is_moe: false,
         num_experts: None,
         top_k_experts: None,
-        eos_token_id: 99,
+        eos_token_ids: vec![99],
     };
     let backend = Arc::new(StubBackend::new(model_config.clone(), num_pages, 42));
     let config = EngineConfig {

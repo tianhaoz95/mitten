@@ -5,8 +5,8 @@ edition = "2021"
 
 [dependencies]
 inference-engine = { path = "../inference-engine" }
-inference-backend = { path = "../inference-backend" }
-burn = { version = "0.16", features = ["ndarray"] }
+inference-backend = { path = "../inference-backend", features = ["wgpu"] }
+burn = { version = "0.16", features = ["ndarray", "wgpu"] }
 inference-model-common = { path = "../inference-model-common" }
 inference-model-gemma = { path = "../inference-model-gemma" }
 inference-model-qwen = { path = "../inference-model-qwen" }
@@ -22,6 +22,7 @@ thiserror = "2"
 async-stream = "0.3"
 futures = "0.3"
 parking_lot = "0.12"
+half = "2.4"
 
 [dev-dependencies]
 axum-test = "20"

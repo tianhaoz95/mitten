@@ -19,7 +19,7 @@ fn make_model_config() -> ModelConfig {
         is_moe: false,
         num_experts: None,
         top_k_experts: None,
-        eos_token_id: 99,
+        eos_token_ids: vec![99],
     }
 }
 

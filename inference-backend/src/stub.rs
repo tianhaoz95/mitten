@@ -44,7 +44,7 @@ impl BackendHandle for StubBackend {
                     self.forced_tokens[idx]
                 } else {
                     // Default to EOS
-                    self.config.eos_token_id
+                    self.config.eos_token_ids[0]
                 }
             } else {
                 let req_id_hash = req.id.as_u128() as u64;

@@ -46,13 +46,8 @@ impl<M: InferenceModel<B> + Send + 'static, B: Backend + 'static> BackendHandle 
             let extend_len = if matches!(req.state, RequestState::Prefilling { .. }) { req.extend_len } else { 1 };
 
             match &req.state {
-                RequestState::Prefilling { processed_tokens } => {
-                    let total = req.input_ids.len();
-                    eprintln!(">> [prefill] {}/{} tokens", processed_tokens + extend_len, total);
-                }
-                RequestState::Decoding => {
-                    eprintln!(">> [decode] {} tokens generated", req.output_ids.len() + 1);
-                }
+                RequestState::Prefilling { .. } => {}
+                RequestState::Decoding => {}
                 _ => {}
             }
             

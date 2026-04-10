@@ -2861,6 +2861,7 @@ dependencies = [
  "axum-test",
  "burn",
  "futures",
+ "half",
  "inference-backend",
  "inference-engine",
  "inference-model-common",
